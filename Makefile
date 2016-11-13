@@ -1,4 +1,4 @@
-NAME := bridge_mac_table_json
+NAME := bridge_mac_table
 
 CFLAGS += -Werror -Wall -Wpedantic
 

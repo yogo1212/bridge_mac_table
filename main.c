@@ -20,28 +20,43 @@ typedef struct {
 	char n[BR_MAX_PORTS][IFNAMSIZ + 1];
 } ifnames_by_port_t;
 
-static void add_fdbs_to_json(struct __fdb_entry *fdb, size_t cnt, ifnames_by_port_t *ifnames_by_port, struct json_object *jlist)
+typedef void (*mac_table_entry_cb_t)(const char *mac, const char *ifname, uint32_t age, bool local, void *arg);
+
+static void print_mac_table_entry(const char *mac, const char *ifname, uint32_t age, bool local, void *arg)
 {
-	char macbuf[18];
+	char delim = *(char *) arg;
+	printf("%s%c%s%c%d%c%d\n", mac, delim, ifname, delim, age, delim, !!local);
+}
+
+static void add_mac_table_entry_to_json(const char *mac, const char *ifname, uint32_t age, bool local, void *arg)
+{
+	struct json_object *jlist = (struct json_object *) arg;
 	struct json_object *jobj;
 
+	jobj = json_object_new_object();
+
+	json_object_object_add(jobj, "ifname",
+		json_object_new_string(ifname));
+
+	json_object_object_add(jobj, "age",
+		json_object_new_int(age));
+
+	json_object_object_add(jobj, "local",
+		json_object_new_boolean(local));
+
+	json_object_object_add(jlist, mac, jobj);
+}
+
+static void call_cb_for_fdbs(struct __fdb_entry *fdb, size_t cnt, ifnames_by_port_t *ifnames_by_port, mac_table_entry_cb_t cb, void *arg)
+{
+	char macbuf[18];
+
 	while (cnt-- > 0) {
-		jobj = json_object_new_object();
-
-		json_object_object_add(jobj, "ifname",
-			json_object_new_string(ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)]));
-
-		json_object_object_add(jobj, "age",
-			json_object_new_int(fdb->ageing_timer_value));
-
-		json_object_object_add(jobj, "local",
-			json_object_new_boolean(fdb->is_local));
-
 		snprintf(macbuf, sizeof(macbuf), "%02x:%02x:%02x:%02x:%02x:%02x",
-				fdb->mac_addr[0], fdb->mac_addr[1], fdb->mac_addr[2], fdb->mac_addr[3], fdb->mac_addr[4], fdb->mac_addr[5]);
+			fdb->mac_addr[0], fdb->mac_addr[1], fdb->mac_addr[2], fdb->mac_addr[3], fdb->mac_addr[4], fdb->mac_addr[5]);
 		macbuf[sizeof(macbuf) - 1] = '\0';
 
-		json_object_object_add(jlist, macbuf, jobj);
+		cb(macbuf, ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)], fdb->ageing_timer_value, !!fdb->is_local, arg);
 	}
 }
 
@@ -81,7 +96,7 @@ static bool fetch_ifnames(int br_sock, struct ifreq *ifr, ifnames_by_port_t *to)
 	return true;
 }
 
-static bool fetch_bridge_mac_table(const char *ifname, struct json_object *jlist)
+static bool fetch_bridge_mac_table(const char *ifname, mac_table_entry_cb_t cb, void *ctx)
 {
 	bool res = false;
 
@@ -93,7 +108,6 @@ static bool fetch_bridge_mac_table(const char *ifname, struct json_object *jlist
 
 	struct ifreq ifr;
 	memset(&ifr, 0, sizeof(ifr));
-
 	strncpy((char *) ifr.ifr_name, ifname, strnlen(ifname, IFNAMSIZ));
 
 	ifnames_by_port_t ifnames_by_port;
@@ -108,7 +122,6 @@ static bool fetch_bridge_mac_table(const char *ifname, struct json_object *jlist
 		sizeof(entries)/sizeof(entries[0]),
 		0
 	};
-
 	ifr.ifr_data = &args;
 
 	int fdb_count;
@@ -120,7 +133,7 @@ static bool fetch_bridge_mac_table(const char *ifname, struct json_object *jlist
 			goto cleanup_fd;
 		}
 
-		add_fdbs_to_json(entries, fdb_count, &ifnames_by_port, jlist);
+		call_cb_for_fdbs(entries, fdb_count, &ifnames_by_port, cb, ctx);
 
 		args[3] += args[2];
 	} while (fdb_count > args[2]);
@@ -136,18 +149,28 @@ cleanup:
 
 int main(int argc, char *argv[])
 {
-	if (argc != 2) {
+	if (argc < 2) {
 		fprintf(stderr, "%s devname\n", argv[0]);
+		fprintf(stderr, "set BRMT_JSON environment variable to produce json output\n");
+		fprintf(stderr, "set BRMT_DELIM environment variable to set the delimiter\n");
 		return -1;
 	}
 
-	struct json_object *jlist = json_object_new_object();
+	if (getenv("BRMT_JSON")) {
+		struct json_object *jlist = json_object_new_object();
 
-	fetch_bridge_mac_table(argv[1], jlist);
+		fetch_bridge_mac_table(argv[1], add_mac_table_entry_to_json, jlist);
 
-	const char *str = json_object_to_json_string(jlist);
-	puts(str);
-	json_object_put(jlist);
+		const char *str = json_object_to_json_string(jlist);
+		puts(str);
+		json_object_put(jlist);
+	}
+	else {
+		char *delim = getenv("BRMT_DELIM");
+		if (!delim)
+			delim = "\t";
+		fetch_bridge_mac_table(argv[1], print_mac_table_entry, delim);
+	}
 
 	return 0;
 }
