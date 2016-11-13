@@ -57,6 +57,7 @@ static void call_cb_for_fdbs(struct __fdb_entry *fdb, size_t cnt, ifnames_by_por
 		macbuf[sizeof(macbuf) - 1] = '\0';
 
 		cb(macbuf, ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)], fdb->ageing_timer_value, !!fdb->is_local, arg);
+		fdb++;
 	}
 }
 
