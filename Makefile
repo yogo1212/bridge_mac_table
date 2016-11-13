@@ -7,7 +7,7 @@ LDFLAGS += -ljson-c
 
 default: $(NAME)
 
-$(NAME): % : %.c
+$(NAME): main.c
 	$(CC) $(LDFLAGS) -o $@ $< $(CFLAGS)
 
 clean:
