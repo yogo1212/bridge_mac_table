@@ -28,11 +28,14 @@ static void add_fdbs_to_json(struct __fdb_entry *fdb, size_t cnt, ifnames_by_por
 	while (cnt-- > 0) {
 		jobj = json_object_new_object();
 
-		json_object_object_add(jobj, "ifname", json_object_new_string(ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)]));
+		json_object_object_add(jobj, "ifname",
+			json_object_new_string(ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)]));
 
-		json_object_object_add(jobj, "age", json_object_new_int(fdb->ageing_timer_value));
+		json_object_object_add(jobj, "age",
+			json_object_new_int(fdb->ageing_timer_value));
 
-		json_object_object_add(jobj, "local", json_object_new_boolean(fdb->is_local));
+		json_object_object_add(jobj, "local",
+			json_object_new_boolean(fdb->is_local));
 
 		snprintf(macbuf, sizeof(macbuf), "%02x:%02x:%02x:%02x:%02x:%02x",
 				fdb->mac_addr[0], fdb->mac_addr[1], fdb->mac_addr[2], fdb->mac_addr[3], fdb->mac_addr[4], fdb->mac_addr[5]);
@@ -46,7 +49,12 @@ static bool fetch_ifnames(int br_sock, struct ifreq *ifr, ifnames_by_port_t *to)
 {
 	int port_ifindices[BR_MAX_PORTS];
 
-	unsigned long args[4] = { BRCTL_GET_PORT_LIST, (uintptr_t) port_ifindices, sizeof(port_ifindices) / sizeof(port_ifindices[0]), 0 };
+	unsigned long args[4] = {
+		BRCTL_GET_PORT_LIST,
+		(uintptr_t) port_ifindices,
+		sizeof(port_ifindices) / sizeof(port_ifindices[0]),
+		0
+	};
 	ifr->ifr_data = &args;
 
 	int port_count;
@@ -94,7 +102,13 @@ static bool fetch_bridge_mac_table(const char *ifname, struct json_object *jlist
 	}
 
 	struct __fdb_entry entries[10];
-	unsigned long args[4] = { BRCTL_GET_FDB_ENTRIES, (uintptr_t) &entries, sizeof(entries)/sizeof(entries[0]), 0 };
+	unsigned long args[4] = {
+		BRCTL_GET_FDB_ENTRIES,
+		(uintptr_t) &entries,
+		sizeof(entries)/sizeof(entries[0]),
+		0
+	};
+
 	ifr.ifr_data = &args;
 
 	int fdb_count;
