@@ -1,0 +1,30 @@
+include $(TOPDIR)/rules.mk
+
+PKG_NAME:=bridge_mac_table
+PKG_VERSION=$(PKG_SOURCE_VERSION)
+
+PKG_SOURCE_PROTO:=git
+PKG_SOURCE_SUBDIR=$(PKG_NAME)-$(PKG_VERSION)
+PKG_SOURCE_VERSION:=0c0ea7c496c4a6dbeae658f1059695c720f36520
+PKG_SOURCE=$(PKG_NAME)-$(PKG_VERSION).tar.bz2
+PKG_SOURCE_URL:=git@github.com:yogo1212/bridge_mac_table.git
+
+include $(INCLUDE_DIR)/package.mk
+
+define Package/$(PKG_NAME)
+  SECTION:=utils
+  CATEGORY:=Network
+  TITLE:=$(PKG_NAME)
+  DEPENDS:=+libjson-c
+endef
+
+define Package/$(PKG_NAME)/description
+	Read the MAC table of a linux bridge.
+endef
+
+define Package/$(PKG_NAME)/install
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(CP) $(PKG_BUILD_DIR)/bridge_mac_table $(1)/usr/bin
+endef
+
+$(eval $(call BuildPackage,$(PKG_NAME)))
