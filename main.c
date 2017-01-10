@@ -137,7 +137,7 @@ static bool fetch_bridge_mac_table(const char *ifname, mac_table_entry_cb_t cb, 
 		call_cb_for_fdbs(entries, fdb_count, &ifnames_by_port, cb, ctx);
 
 		args[3] += args[2];
-	} while (fdb_count > args[2]);
+	} while (fdb_count >= args[2]);
 
 	res = true;
 
