@@ -1,5 +1,7 @@
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/if.h>
 #include <linux/if_bridge.h>
 #include <stdbool.h>
@@ -47,104 +49,129 @@ static void add_mac_table_entry_to_json(const char *mac, const char *ifname, uin
 	json_object_object_add(jlist, mac, jobj);
 }
 
-static void call_cb_for_fdbs(struct __fdb_entry *fdb, size_t cnt, ifnames_by_port_t *ifnames_by_port, mac_table_entry_cb_t cb, void *arg)
-{
-	char macbuf[18];
-
-	while (cnt-- > 0) {
-		snprintf(macbuf, sizeof(macbuf), "%02x:%02x:%02x:%02x:%02x:%02x",
-			fdb->mac_addr[0], fdb->mac_addr[1], fdb->mac_addr[2], fdb->mac_addr[3], fdb->mac_addr[4], fdb->mac_addr[5]);
-		macbuf[sizeof(macbuf) - 1] = '\0';
-
-		cb(macbuf, ifnames_by_port->n[fdb->port_no | (fdb->port_hi << 8)], fdb->ageing_timer_value, !!fdb->is_local, arg);
-		fdb++;
-	}
-}
-
-static bool fetch_ifnames(int br_sock, struct ifreq *ifr, ifnames_by_port_t *to)
-{
-	int port_ifindices[BR_MAX_PORTS];
-
-	unsigned long args[4] = {
-		BRCTL_GET_PORT_LIST,
-		(uintptr_t) port_ifindices,
-		sizeof(port_ifindices) / sizeof(port_ifindices[0]),
-		0
-	};
-	ifr->ifr_data = &args;
-
-	int port_count;
-
-	port_count = ioctl(br_sock, SIOCDEVPRIVATE, ifr);
-	if (port_count == -1) {
-		printf("GET_PORT_LIST ouch %d %s\n", errno, strerror(errno));
+static bool read_uint(const char *path, unsigned long *into) {
+	int f = open(path, O_RDONLY);
+	if (f == -1) {
+		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
 		return false;
 	}
 
-	struct ifreq tmp;
-	while (port_count-- > 0) {
-		if (port_ifindices[port_count] == 0)
-			continue;
-		tmp.ifr_ifindex = port_ifindices[port_count];
-		if (ioctl(br_sock, SIOCGIFNAME, &tmp) == -1) {
-			fprintf(stderr, "SIOCGIFNAME ouch %s\n", strerror(errno));
-			continue;
-		}
-		strncpy(to->n[port_count], tmp.ifr_name, IFNAMSIZ);
-		to->n[port_count][IFNAMSIZ] = '\0';
-	}
-
-	return true;
-}
-
-static bool fetch_bridge_mac_table(const char *ifname, mac_table_entry_cb_t cb, void *ctx)
-{
 	bool res = false;
 
-	int fd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-	if (fd == -1) {
-		fprintf(stderr, "open ouch: %s\n", strerror(errno));
+	char buf[128];
+	ssize_t rlen = read(f, buf, sizeof(buf) - 1);
+	if (rlen == -1) {
+		fprintf(stderr, "read %s: %s\n", path, strerror(errno));
 		goto cleanup;
 	}
 
-	struct ifreq ifr;
-	memset(&ifr, 0, sizeof(ifr));
-	strncpy((char *) ifr.ifr_name, ifname, strnlen(ifname, IFNAMSIZ));
+	buf[rlen] = '\0';
+
+	errno = 0;
+	*into = strtoul(buf, NULL, 0);
+	if (errno != 0) {
+		fprintf(stderr, "error parsing uint '%s': %s\n", buf, strerror(errno));
+		goto cleanup;
+	}
+
+	res = true;
+
+cleanup:
+	close(f);
+
+	return res;
+}
+
+static bool fetch_ifnames(const char *bridge, ifnames_by_port_t *to)
+{
+	// we're in /sys/class/net
+	char path_buf[512];
+	snprintf(path_buf, sizeof(path_buf), "%s/brif", bridge);
+
+	DIR *d = opendir(path_buf);
+	if (!d) {
+		fprintf(stderr, "opendir %s: %s\n", path_buf, strerror(errno));
+		return false;
+	}
+
+	bool res = false;
+
+	struct dirent *dir;
+	while ((dir = readdir(d))) {
+		const char *name = dir->d_name;
+		if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+			continue;
+
+		unsigned long port_no;
+
+		snprintf(path_buf, sizeof(path_buf), "%s/brif/%s/port_no", bridge, name);
+		if (!read_uint(path_buf, &port_no))
+			goto cleanup;
+
+		if (port_no >= BR_MAX_PORTS) {
+			fprintf(stderr, "invalid port_no %s: %lu\n", name, port_no);
+			continue;
+		}
+
+		strncpy(to->n[port_no], name, IFNAMSIZ);
+		to->n[port_no][IFNAMSIZ] = '\0';
+	}
+
+	res = true;
+
+cleanup:
+	closedir(d);
+
+	return res;
+}
+
+static bool fetch_bridge_mac_table(const char *bridge, mac_table_entry_cb_t cb, void *ctx)
+{
+	char path[256];
+	snprintf(path, sizeof(path), "/sys/devices/virtual/net/%s/brforward", bridge);
+
+	int f = open(path, O_RDONLY);
+	if (f == -1) {
+		fprintf(stderr, "open %s: %s\n", path, strerror(errno));
+		return false;
+	}
 
 	ifnames_by_port_t ifnames_by_port;
-	if (!fetch_ifnames(fd, &ifr, &ifnames_by_port)) {
+	if (!fetch_ifnames(bridge, &ifnames_by_port))
+		return false;
+
+	bool res = false;
+	ssize_t rlen;
+
+	while (true) {
+		struct __fdb_entry entry;
+		rlen = read(f, &entry, sizeof(entry));
+		if (rlen != sizeof(entry))
+			break;
+
+		char macbuf[18];
+		snprintf(macbuf, sizeof(macbuf), "%02x:%02x:%02x:%02x:%02x:%02x",
+			entry.mac_addr[0], entry.mac_addr[1], entry.mac_addr[2], entry.mac_addr[3], entry.mac_addr[4], entry.mac_addr[5]);
+		macbuf[sizeof(macbuf) - 1] = '\0';
+
+		cb(macbuf, ifnames_by_port.n[entry.port_no | (entry.port_hi << 8)], entry.ageing_timer_value, !!entry.is_local, ctx);
+	}
+
+	if (rlen == -1) {
+		fprintf(stderr, "read %s: %s\n", path, strerror(errno));
 		goto cleanup_fd;
 	}
 
-	struct __fdb_entry entries[10];
-	unsigned long args[4] = {
-		BRCTL_GET_FDB_ENTRIES,
-		(uintptr_t) &entries,
-		sizeof(entries)/sizeof(entries[0]),
-		0
-	};
-	ifr.ifr_data = &args;
-
-	int fdb_count;
-
-	do {
-		fdb_count = ioctl(fd, SIOCDEVPRIVATE, &ifr);
-		if (fdb_count == -1) {
-			fprintf(stderr, "GET_FDB_ENTRIES ouch: %s\n", strerror(errno));
-			goto cleanup_fd;
-		}
-
-		call_cb_for_fdbs(entries, fdb_count, &ifnames_by_port, cb, ctx);
-
-		args[3] += args[2];
-	} while (fdb_count >= args[2]);
+	if (rlen > 0) {
+		fprintf(stderr, "short read %s (%zd)\n", path, rlen);
+		goto cleanup_fd;
+	}
 
 	res = true;
 
 cleanup_fd:
-	close(fd);
+	close(f);
 
-cleanup:
 	return res;
 }
 
@@ -157,10 +184,21 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
+	if (chdir("/sys/class/net") != 0) {
+		fprintf(stderr, "error changing to /sys/class/net: %s\n", strerror(errno));
+		return -1;
+	}
+
+	const char *bridge = argv[1];
+	if (strlen(bridge) > IFNAMSIZ) {
+		fprintf(stderr, "bridge name invalied\n");
+		return -1;
+	}
+
 	if (getenv("BRMT_JSON")) {
 		struct json_object *jlist = json_object_new_object();
 
-		fetch_bridge_mac_table(argv[1], add_mac_table_entry_to_json, jlist);
+		fetch_bridge_mac_table(bridge, add_mac_table_entry_to_json, jlist);
 
 		const char *str = json_object_to_json_string(jlist);
 		puts(str);
@@ -170,7 +208,7 @@ int main(int argc, char *argv[])
 		char *delim = getenv("BRMT_DELIM");
 		if (!delim)
 			delim = "\t";
-		fetch_bridge_mac_table(argv[1], print_mac_table_entry, delim);
+		fetch_bridge_mac_table(bridge, print_mac_table_entry, delim);
 	}
 
 	return 0;
